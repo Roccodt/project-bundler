@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=Project Bundler
-Comment=Archive and Restore Projects
-Exec=/usr/bin/project-bundler
-Icon=project-bundler
-Type=Application
-Terminal=false
-Categories=Utility;
