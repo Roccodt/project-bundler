@@ -1,0 +1,4 @@
+#!/bin/bash
+echo "Finalizing Project Bundler installation..."
+# Install Python wrappers globally for the system Python
+pip3 install customtkinter tkinterdnd2 --break-system-packages --quiet || true

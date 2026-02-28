@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+import customtkinter as ctk
+from tkinterdnd2 import DND_FILES, TkinterDnD
+from tkinter import filedialog, messagebox, Tk
+import tarfile, gzip, base64, io, threading, subprocess, hashlib, os
+from pathlib import Path
+import shutil
+from datetime import datetime
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+LIBRARY_FOLDER = Path.home() / "MyProjectBundles"
+
+# --- ADDED FOR LINUX COMPATIBILITY ---
+def fix_tkdnd_path(root):
+    """Force Tcl to look in common Linux library paths for tkdnd"""
+    search_paths = [
+        "/usr/lib/tkdnd2.9",
+        "/usr/lib/tcltk/tkdnd2.8",
+        "/usr/share/tcltk/tkdnd2.8",
+        "/usr/lib/tkdnd",
+    ]
+    for path in search_paths:
+        if os.path.exists(path):
+            root.tk.eval(f'lappend auto_path {{ {path} }}')
+# ==========================================================
+# LINUX NATIVE FILE PICKERS (NAUTILUS STYLE)
+# ==========================================================
+
+def zenity_select_folder():
+    try:
+        proc = subprocess.run(
+            ["zenity", "--file-selection", "--directory"],
+            capture_output=True,
+            text=True
+        )
+
+        # User pressed cancel
+        if proc.returncode != 0:
+            return None
+
+        return proc.stdout.strip()
+
+    except FileNotFoundError:
+        return filedialog.askdirectory()
+
+
+def zenity_select_file():
+    try:
+        proc = subprocess.run(
+            ["zenity", "--file-selection"],
+            capture_output=True,
+            text=True
+        )
+
+        if proc.returncode != 0:
+            return None
+
+        return proc.stdout.strip()
+
+    except FileNotFoundError:
+        return filedialog.askopenfilename()
+
+
+# ==========================================================
+# HASHING
+# ==========================================================
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ==========================================================
+# APP
+# ==========================================================
+
+class ProjectBundler(TkinterDnD.DnDWrapper, ctk.CTk):
+
+    def __init__(self):
+        super().__init__()
+        
+        try:
+            fix_tkdnd_path(self)
+        except Exception as e:
+            print(f"Path injection warning: {e}")
+            
+        self.title("Project Bundler v3")
+        self.geometry("820x620")
+
+        self.current_folder = None
+
+        ctk.CTkLabel(
+            self,
+            text="PROJECT BUNDLER",
+            font=ctk.CTkFont(size=30, weight="bold"),
+            text_color="#00B4FF"
+        ).pack(pady=15)
+
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.pack(fill="both", expand=True, padx=20, pady=10)
+
+        self.tabview.add("Archive")
+        self.tabview.add("Restore")
+        self.tabview.add("Library")
+
+        self.build_archive_tab()
+        self.build_restore_tab()
+        self.build_library_tab()
+
+        LIBRARY_FOLDER.mkdir(exist_ok=True)
+
+    # ======================================================
+    # ARCHIVE TAB
+    # ======================================================
+
+    def build_archive_tab(self):
+        tab = self.tabview.tab("Archive")
+        frame = ctk.CTkFrame(tab)
+        frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ctk.CTkButton(frame, text="Select Folder",
+                      command=self.select_folder).pack(pady=10)
+
+        self.folder_label = ctk.CTkLabel(frame, text="No folder selected")
+        self.folder_label.pack()
+
+        self.go_btn = ctk.CTkButton(
+            frame,
+            text="🚀 Archive Project",
+            state="disabled",
+            command=self.start_archive_thread
+        )
+        self.go_btn.pack(pady=10)
+
+        self.progress = ctk.CTkProgressBar(frame, width=600)
+        self.progress.pack(pady=10)
+
+        self.status = ctk.CTkLabel(frame, text="Ready")
+        self.status.pack()
+
+        self.delete_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            frame,
+            text="Delete original ONLY after verification",
+            variable=self.delete_var
+        ).pack(pady=10)
+        
+        self.drop_label = ctk.CTkLabel(
+            frame,
+            text="➕ Drop Folder Here",
+            height=80,
+            fg_color="#1F252D",
+            corner_radius=12
+        )
+        self.drop_label.pack(fill="x", padx=40, pady=10)
+
+        self.drop_label.drop_target_register(DND_FILES)
+        self.drop_label.dnd_bind("<<Drop>>", self.on_archive_drop)
+        
+    def on_archive_drop(self, event):
+        path = event.data.strip("{}")
+
+        if Path(path).is_dir():
+            self.current_folder = path
+            self.folder_label.configure(text=path)
+            self.go_btn.configure(state="normal")
+
+    def select_folder(self):
+        folder = zenity_select_folder()
+        if folder:
+            self.current_folder = folder
+            self.folder_label.configure(text=folder)
+            self.go_btn.configure(state="normal")
+
+    # ======================================================
+    # ARCHIVE ENGINE
+    # ======================================================
+
+    def start_archive_thread(self):
+        threading.Thread(target=self._archive, daemon=True).start()
+
+    def update_status(self, text, progress):
+        self.after(0, lambda: (
+            self.status.configure(text=text),
+            self.progress.set(progress)
+        ))
+
+    def _archive(self):
+
+        folder = Path(self.current_folder)
+        files = [f for f in folder.rglob("*") if f.is_file()]
+
+        self.update_status("Scanning files...", 0.1)
+
+        original_hashes = {
+            str(f.relative_to(folder)): sha256_file(f)
+            for f in files
+        }
+    
+        tar_buf = io.BytesIO()
+
+        self.update_status("Creating archive...", 0.3)
+
+        with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+            for f in files:
+                tar.add(f, arcname=f.relative_to(folder))
+
+        self.update_status("Compressing...", 0.5)
+
+        gzipped = gzip.compress(tar_buf.getvalue())
+        encoded = base64.b64encode(gzipped).decode()
+
+        # ---------- VERIFY BEFORE WRITING ----------
+        self.update_status("Verifying integrity...", 0.75)
+
+        decoded = gzip.decompress(base64.b64decode(encoded))
+
+        with tarfile.open(fileobj=io.BytesIO(decoded)) as tar:
+            for member in tar.getmembers():
+                extracted = tar.extractfile(member)
+                if extracted:
+                    h = hashlib.sha256(extracted.read()).hexdigest()
+                    if original_hashes[member.name] != h:
+                        raise Exception("Verification FAILED")
+
+        # ---------- WRITE ONLY TO LIBRARY ----------
+        bundle_path = LIBRARY_FOLDER / f"{folder.name}.bundle.txt"
+
+        counter = 2
+        while bundle_path.exists():
+            bundle_path = LIBRARY_FOLDER / f"{folder.name}_v{counter}.bundle.txt"
+            counter += 1
+
+        bundle_path.write_text(encoded)
+
+        self.update_status("Verified ✓", 1.0)
+
+        if self.delete_var.get():
+            shutil.rmtree(folder)
+
+        self.after(0, lambda:
+            messagebox.showinfo(
+                "Success",
+                f"Archive verified 100%.\nSaved to:\n{bundle_path}"
+            ))
+
+        self.load_library()
+
+    # ======================================================
+    # RESTORE (WITH DRAG DROP)
+    # ======================================================
+
+    def build_restore_tab(self):
+        tab = self.tabview.tab("Restore")
+        frame = ctk.CTkFrame(tab)
+        frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        self.restore_label = ctk.CTkLabel(
+            frame,
+            text="Drop bundle here or click Select",
+            height=80,
+            fg_color="#1F252D",
+            corner_radius=12
+        )
+        self.restore_label.pack(pady=20, fill="x", padx=40)
+
+        self.restore_label.drop_target_register(DND_FILES)
+        self.restore_label.dnd_bind("<<Drop>>", self.on_restore_drop)
+
+        ctk.CTkButton(frame, text="Select Bundle",
+                      command=self.start_restore).pack()
+
+        try:
+            from tkinterdnd2 import DND_FILES
+            self.restore_label.drop_target_register(DND_FILES)
+            self.restore_label.dnd_bind("<<Drop>>", self.on_restore_drop)
+        except:
+            pass
+
+    def on_restore_drop(self, event):
+        path = event.data.strip("{}")
+
+        if path.endswith(".bundle.txt"):
+            self.restore_specific(Path(path))
+
+    def start_restore(self):
+        file = zenity_select_file()
+        if file:
+            self.restore_specific(Path(file))
+
+    def restore_specific(self, bundle):
+        threading.Thread(target=self._restore,
+                         args=(bundle,),
+                         daemon=True).start()
+
+    def _restore(self, bundle):
+
+        dest = zenity_select_folder()
+        if not dest:
+            return
+
+        decoded = gzip.decompress(base64.b64decode(bundle.read_text()))
+
+        out = Path(dest) / bundle.stem.replace(".bundle", "")
+        out.mkdir(exist_ok=True)
+
+        with tarfile.open(fileobj=io.BytesIO(decoded)) as tar:
+            tar.extractall(out)
+
+        self.after(0, lambda:
+            messagebox.showinfo("Restored", f"Restored to:\n{out}"))
+
+    # ======================================================
+    # LIBRARY
+    # ======================================================
+
+    def build_library_tab(self):
+        tab = self.tabview.tab("Library")
+        self.library = ctk.CTkScrollableFrame(tab)
+        self.library.pack(fill="both", expand=True, padx=10, pady=10)
+        self.load_library()
+
+    def load_library(self):
+        for w in self.library.winfo_children():
+            w.destroy()
+
+        for bundle in sorted(LIBRARY_FOLDER.glob("*.bundle.txt"),
+                             key=lambda x: x.stat().st_mtime,
+                             reverse=True):
+
+            row = ctk.CTkFrame(self.library)
+            row.pack(fill="x", pady=4)
+
+            ctk.CTkLabel(row, text=bundle.name).pack(side="left", padx=10)
+
+            ctk.CTkButton(
+                row,
+                text="Restore",
+                command=lambda b=bundle: self.restore_specific(b)
+            ).pack(side="right", padx=5)
+
+
+if __name__ == "__main__":
+    app = ProjectBundler()
+    app.mainloop()

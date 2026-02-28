@@ -1,0 +1,6 @@
+Package: project-bundler
+Version: 3.0
+Architecture: amd64
+Maintainer: Rocco
+Depends: python3, python3-tk, python3-pip, zenity, libtkdnd2.9 | tkdnd
+Description: Professional project archiver with verification.
