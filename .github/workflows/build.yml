@@ -6,6 +6,11 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Shared version resolution used in all three jobs:
+# - Tag push (v1.2)  →  strips 'v'  →  "1.2"
+# - Manual trigger   →  GITHUB_REF_NAME is a branch name like "main"
+#                    →  falls back to "0.0-dev" (valid deb version)
+
 jobs:
   # ════════════════════════════════════════════════════
   # JOB 1 — Build the PyInstaller binary
@@ -19,12 +24,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Get version from tag
+      - name: Resolve version
         id: version
         run: |
-          VERSION="${GITHUB_REF_NAME:-dev}"
-          VERSION="${VERSION#v}"
+          REF="${GITHUB_REF_NAME:-dev}"
+          if [[ "$REF" =~ ^v?[0-9]+\.[0-9] ]]; then
+            VERSION="${REF#v}"
+          else
+            VERSION="0.0-dev"
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
 
       - name: Install system dependencies
         run: |
@@ -79,12 +89,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Get version
+      - name: Resolve version
         id: version
         run: |
-          VERSION="${GITHUB_REF_NAME:-dev}"
-          VERSION="${VERSION#v}"
+          REF="${GITHUB_REF_NAME:-dev}"
+          if [[ "$REF" =~ ^v?[0-9]+\.[0-9] ]]; then
+            VERSION="${REF#v}"
+          else
+            VERSION="0.0-dev"
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
 
       - name: Download binary artifact
         uses: actions/download-artifact@v4
@@ -119,12 +134,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Get version
+      - name: Resolve version
         id: version
         run: |
-          VERSION="${GITHUB_REF_NAME:-dev}"
-          VERSION="${VERSION#v}"
+          REF="${GITHUB_REF_NAME:-dev}"
+          if [[ "$REF" =~ ^v?[0-9]+\.[0-9] ]]; then
+            VERSION="${REF#v}"
+          else
+            VERSION="0.0-dev"
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
 
       - name: Download binary
         uses: actions/download-artifact@v4
