@@ -25,7 +25,7 @@ def zenity_select_folder(title="Select Folder"):
         )
         return proc.stdout.strip() if proc.returncode == 0 else None
     except FileNotFoundError:
-        return filedialog.askdirectory(title=title) or None
+        return None
 
 
 def zenity_select_file(title="Select Bundle"):
@@ -38,10 +38,47 @@ def zenity_select_file(title="Select Bundle"):
         )
         return proc.stdout.strip() if proc.returncode == 0 else None
     except FileNotFoundError:
-        return filedialog.askopenfilename(
+        return None
+
+
+# ─────────────────────────────────────────────────────────────
+# SAFE DIALOG HELPERS
+# Zenity is tried first. If it fails or isn't installed, we
+# fall back to tkinter dialogs. The root window is withdrawn
+# before opening tkinter dialogs so they get focus correctly
+# when running as a PyInstaller bundle.
+# ─────────────────────────────────────────────────────────────
+
+def pick_folder(root, title="Select Folder"):
+    result = zenity_select_folder(title)
+    if result:
+        return result
+    root.withdraw()
+    try:
+        path = filedialog.askdirectory(title=title, parent=root)
+    finally:
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+    return path or None
+
+
+def pick_file(root, title="Select Bundle"):
+    result = zenity_select_file(title)
+    if result:
+        return result
+    root.withdraw()
+    try:
+        path = filedialog.askopenfilename(
             title=title,
+            parent=root,
             filetypes=[("Bundle files", "*.bundle.txt"), ("All files", "*.*")]
-        ) or None
+        )
+    finally:
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+    return path or None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -57,11 +94,12 @@ def sha256_file(path):
 
 
 # ─────────────────────────────────────────────────────────────
-# HELPER — full-width drop zone frame
+# DROP ZONE
+# Both the frame AND the label are registered as DnD targets
+# so every pixel of the visible zone accepts drops.
 # ─────────────────────────────────────────────────────────────
 
 def make_drop_zone(parent, text, height=90):
-    """Returns a CTkFrame styled as a drop zone that fills its parent width."""
     zone = ctk.CTkFrame(
         parent,
         height=height,
@@ -81,10 +119,15 @@ def make_drop_zone(parent, text, height=90):
     )
     lbl.place(relx=0.5, rely=0.5, anchor="center")
 
-    # keep label from eating mouse events (so the frame gets them)
-    lbl.lower()
-
     return zone, lbl
+
+
+def register_drop_zone(zone, lbl, handler):
+    """Register both frame and label so the full area accepts drops."""
+    zone.drop_target_register(DND_FILES)
+    zone.dnd_bind("<<Drop>>", handler)
+    lbl.drop_target_register(DND_FILES)
+    lbl.dnd_bind("<<Drop>>", handler)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -96,16 +139,15 @@ class ProjectBundler(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         self.title("Project Bundler v3")
-        self.geometry("860x660")
+        self.geometry("860x680")
         self.resizable(True, True)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        self.current_folder   = None   # archive tab
-        self.restore_bundle   = None   # restore tab — selected bundle path
-        self.restore_dest     = None   # restore tab — selected destination
+        self.current_folder = None
+        self.restore_bundle = None
+        self.restore_dest   = None
 
-        # ── header ──────────────────────────────────────────
         ctk.CTkLabel(
             self,
             text="PROJECT BUNDLER",
@@ -113,7 +155,6 @@ class ProjectBundler(TkinterDnD.Tk):
             text_color="#00B4FF"
         ).pack(pady=(14, 4))
 
-        # ── tabs ────────────────────────────────────────────
         self.tabview = ctk.CTkTabview(self)
         self.tabview.pack(fill="both", expand=True, padx=20, pady=(0, 14))
 
@@ -135,14 +176,15 @@ class ProjectBundler(TkinterDnD.Tk):
         frame = ctk.CTkFrame(tab)
         frame.pack(fill="both", expand=True, padx=16, pady=16)
 
-        # ── drop zone (full width) ───────────────────────────
         self.archive_drop_zone, self.archive_drop_lbl = make_drop_zone(
             frame, "➕  Drop project folder here"
         )
-        self.archive_drop_zone.drop_target_register(DND_FILES)
-        self.archive_drop_zone.dnd_bind("<<Drop>>", self.on_archive_drop)
+        register_drop_zone(
+            self.archive_drop_zone,
+            self.archive_drop_lbl,
+            self.on_archive_drop
+        )
 
-        # ── selected folder display ──────────────────────────
         folder_row = ctk.CTkFrame(frame, fg_color="transparent")
         folder_row.pack(fill="x", pady=(0, 4))
 
@@ -157,29 +199,26 @@ class ProjectBundler(TkinterDnD.Tk):
         ctk.CTkButton(
             folder_row,
             text="Browse…",
-            width=90,
-            command=self.select_folder
+            width=100,
+            command=self._browse_archive_folder
         ).pack(side="right", padx=4)
 
-        # ── options ──────────────────────────────────────────
         self.delete_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             frame,
             text="Delete original folder ONLY after successful verification",
             variable=self.delete_var
-        ).pack(anchor="w", padx=4, pady=4)
+        ).pack(anchor="w", padx=4, pady=6)
 
-        # ── archive button ───────────────────────────────────
         self.go_btn = ctk.CTkButton(
             frame,
             text="🚀  Archive Project",
-            height=42,
+            height=44,
             state="disabled",
             command=self.start_archive_thread
         )
         self.go_btn.pack(fill="x", pady=8)
 
-        # ── progress ─────────────────────────────────────────
         self.progress = ctk.CTkProgressBar(frame)
         self.progress.set(0)
         self.progress.pack(fill="x", pady=(0, 4))
@@ -192,8 +231,12 @@ class ProjectBundler(TkinterDnD.Tk):
         if Path(path).is_dir():
             self._set_archive_folder(path)
 
-    def select_folder(self):
-        folder = zenity_select_folder("Select project folder to archive")
+    def _browse_archive_folder(self):
+        # Delay 10ms so button-press fully resolves before dialog opens
+        self.after(10, self._do_browse_archive_folder)
+
+    def _do_browse_archive_folder(self):
+        folder = pick_folder(self, "Select project folder to archive")
         if folder:
             self._set_archive_folder(folder)
 
@@ -274,19 +317,20 @@ class ProjectBundler(TkinterDnD.Tk):
         frame = ctk.CTkFrame(tab)
         frame.pack(fill="both", expand=True, padx=16, pady=16)
 
-        # ── step 1: select bundle ─────────────────────────────
         ctk.CTkLabel(frame, text="Step 1 — Select Bundle",
                      font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=4)
 
         self.restore_drop_zone, self.restore_drop_lbl = make_drop_zone(
-            frame, "📦  Drop .bundle.txt here  or  click Browse"
+            frame, "📦  Drop .bundle.txt here"
         )
-        self.restore_drop_zone.drop_target_register(DND_FILES)
-        self.restore_drop_zone.dnd_bind("<<Drop>>", self.on_restore_drop)
+        register_drop_zone(
+            self.restore_drop_zone,
+            self.restore_drop_lbl,
+            self.on_restore_drop
+        )
 
-        # selected bundle info row
         bundle_row = ctk.CTkFrame(frame, fg_color="transparent")
-        bundle_row.pack(fill="x", pady=(0, 8))
+        bundle_row.pack(fill="x", pady=(0, 12))
 
         self.restore_bundle_label = ctk.CTkLabel(
             bundle_row,
@@ -299,11 +343,10 @@ class ProjectBundler(TkinterDnD.Tk):
         ctk.CTkButton(
             bundle_row,
             text="Browse…",
-            width=90,
-            command=self.browse_restore_bundle
+            width=100,
+            command=self._browse_restore_bundle
         ).pack(side="right", padx=4)
 
-        # ── step 2: select destination ────────────────────────
         ctk.CTkLabel(frame, text="Step 2 — Select Destination",
                      font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=4)
 
@@ -321,15 +364,14 @@ class ProjectBundler(TkinterDnD.Tk):
         ctk.CTkButton(
             dest_row,
             text="Browse…",
-            width=90,
-            command=self.browse_restore_dest
+            width=100,
+            command=self._browse_restore_dest
         ).pack(side="right", padx=4)
 
-        # ── step 3: go ────────────────────────────────────────
         self.restore_go_btn = ctk.CTkButton(
             frame,
             text="📂  Restore Project",
-            height=42,
+            height=44,
             state="disabled",
             command=self.do_restore
         )
@@ -344,13 +386,19 @@ class ProjectBundler(TkinterDnD.Tk):
         if path.endswith(".bundle.txt") and Path(path).is_file():
             self._set_restore_bundle(Path(path))
 
-    def browse_restore_bundle(self):
-        f = zenity_select_file("Select bundle to restore")
+    def _browse_restore_bundle(self):
+        self.after(10, self._do_browse_restore_bundle)
+
+    def _do_browse_restore_bundle(self):
+        f = pick_file(self, "Select bundle to restore")
         if f:
             self._set_restore_bundle(Path(f))
 
-    def browse_restore_dest(self):
-        d = zenity_select_folder("Select destination folder")
+    def _browse_restore_dest(self):
+        self.after(10, self._do_browse_restore_dest)
+
+    def _do_browse_restore_dest(self):
+        d = pick_folder(self, "Select destination folder")
         if d:
             self._set_restore_dest(d)
 
@@ -379,7 +427,6 @@ class ProjectBundler(TkinterDnD.Tk):
             daemon=True
         ).start()
 
-    # called from Library tab — picks dest first on main thread
     def restore_specific(self, bundle):
         self._set_restore_bundle(bundle)
         self.tabview.set("Restore")
@@ -391,8 +438,7 @@ class ProjectBundler(TkinterDnD.Tk):
             decoded = gzip.decompress(base64.b64decode(bundle.read_text()))
             out = Path(dest) / bundle.stem.replace(".bundle", "")
             out.mkdir(exist_ok=True)
-            self.after(0, lambda: self.restore_status.configure(
-                text="Extracting…"))
+            self.after(0, lambda: self.restore_status.configure(text="Extracting…"))
             with tarfile.open(fileobj=io.BytesIO(decoded)) as tar:
                 tar.extractall(out)
             self.after(0, lambda: self.restore_status.configure(
@@ -451,31 +497,21 @@ class ProjectBundler(TkinterDnD.Tk):
 
         size_kb = bundle.stat().st_size // 1024
         ctk.CTkLabel(
-            row,
-            text=f"  📦  {bundle.name}",
-            anchor="w"
+            row, text=f"  📦  {bundle.name}", anchor="w"
         ).pack(side="left", fill="x", expand=True, padx=6, pady=8)
+
         ctk.CTkLabel(
-            row,
-            text=f"{size_kb} KB",
-            text_color="#8899AA",
-            width=70
+            row, text=f"{size_kb} KB", text_color="#8899AA", width=70
         ).pack(side="left")
 
         ctk.CTkButton(
-            row,
-            text="Restore",
-            width=80,
+            row, text="Restore", width=80,
             command=lambda b=bundle: self.restore_specific(b)
         ).pack(side="right", padx=4, pady=6)
 
         ctk.CTkButton(
-            row,
-            text="🗑",
-            width=36,
-            fg_color="#3A1A1A",
-            hover_color="#6A2A2A",
-            text_color="#FF6666",
+            row, text="🗑", width=36,
+            fg_color="#3A1A1A", hover_color="#6A2A2A", text_color="#FF6666",
             command=lambda b=bundle, r=row: self._delete_bundle(b, r)
         ).pack(side="right", padx=(0, 2), pady=6)
 
